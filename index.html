@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Generator Kuitansi</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+  <style>
+    .hero{margin-bottom:16px;padding:10px 4px 8px}
+    .hero p{margin:0}
+    .step{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:999px;font-size:12px;font-weight:700;background:rgba(111,181,255,.18);border:1px solid rgba(111,181,255,.34);color:#d8e9ff;margin-right:8px}
+    .stack{display:grid;gap:12px}
+    .note{font-size:12px;color:var(--muted)}
+    .stats{display:grid;grid-template-columns:1fr;gap:10px;margin-top:12px}
+    .stat{padding:12px;border-radius:12px;border:1px solid var(--line);background:rgba(8,14,28,.52)}
+    .stat b{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+    .stat span{font-weight:700}
+    .status{white-space:pre-wrap}
+    .status-link{display:inline-block;margin-top:8px;color:var(--accent);font-weight:700;word-break:break-all}
+    .status-link[hidden]{display:none}
+    .actions{margin-top:14px}
+    .actions button{width:auto;min-width:180px}
+    .kbd{font-family:var(--mono);font-size:11px;border:1px solid var(--line);padding:2px 6px;border-radius:6px;background:rgba(4,8,20,.65)}
+    @media (max-width:680px){ .actions button{width:100%} }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header class="hero">
+      <h1>Generator Kuitansi</h1>
+      <p class="muted">Ambil info sheet, tentukan range baris data, lalu generate PDF kuitansi dari Apps Script Web App.</p>
+    </header>
+
+    <section class="grid">
+      <div class="card">
+        <h2><span class="step">1</span>Pilih Data</h2>
+        <div class="stack">
+          <div class="row">
+            <div class="field">
+              <label for="sheetSelect">Pilih Sheet</label>
+              <select id="sheetSelect">
+                <option value="">Ambil info sheet dulu</option>
+              </select>
+              <div class="note">Nama pilihan sesuai daftar sheet yang tersedia di spreadsheet.</div>
+            </div>
+          </div>
+
+          <div class="row">
+            <div class="field">
+              <label for="startRow">Mulai baris (data)</label>
+              <input id="startRow" type="number" value="2" min="2" inputmode="numeric" />
+              <div class="note">Minimal baris <span class="kbd">2</span> (baris header biasanya di atas).</div>
+            </div>
+            <div class="field">
+              <label for="endRow">Sampai baris (data)</label>
+              <input id="endRow" type="number" value="2" min="2" inputmode="numeric" />
+              <div class="note">Pastikan tidak lebih kecil dari baris mulai.</div>
+            </div>
+          </div>
+
+          <div class="row actions">
+            <button class="ghost" id="btnInfo" type="button">Ambil Info Sheet</button>
+            <button class="primary" id="btnGen" type="button">Generate PDF</button>
+          </div>
+        </div>
+      </div>
+
+      <aside class="card">
+        <h2><span class="step">2</span>Status & Hasil</h2>
+        <div class="muted">Progress request dan ringkasan hasil generate akan tampil di sini.</div>
+
+        <div class="stats">
+          <div class="stat">
+            <b>Sheet</b>
+            <span id="sheetNameText">Belum diambil</span>
+          </div>
+          <div class="stat">
+            <b>Last Row</b>
+            <span id="lastRowText">-</span>
+          </div>
+          <div class="stat">
+            <b>Range Aktif</b>
+            <span id="rangeText">2 - 2</span>
+          </div>
+        </div>
+
+        <div class="status" id="status" role="status" aria-live="polite">Siap.</div>
+        <a id="pdfLink" class="status-link" hidden target="_blank" rel="noopener noreferrer">Print PDF hasil</a>
+      </aside>
+    </section>
+  </main>
+
+  <script>
+    // GANTI INI:
+    const GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyJ2OG5k2n21ElqIkWUI-RsmxvC_qYlEni_yPNgiJLuLLR1AZjO4WngQc53SbK7Ow/exec";
+
+    const $ = (id)=>document.getElementById(id);
+    let busy = false;
+    let knownSheetNames = [];
+
+    function setBusy(next) {
+      busy = next;
+      $("btnInfo").disabled = next;
+      $("btnGen").disabled = next;
+      $("sheetSelect").disabled = next;
+      $("startRow").disabled = next;
+      $("endRow").disabled = next;
+    }
+
+    function setStatus(msg, type = "") {
+      const el = $("status");
+      el.textContent = msg;
+      el.className = "status" + (type ? ` ${type}` : "");
+    }
+
+    function setPdfLink(url, text = "Print PDF hasil") {
+      const link = $("pdfLink");
+      if (!url) {
+        link.hidden = true;
+        link.removeAttribute("href");
+        return;
+      }
+      link.href = url;
+      link.textContent = text;
+      link.hidden = false;
+    }
+
+    function currentRange() {
+      return {
+        sheetName: $("sheetSelect").value.trim(),
+        startRow: Number($("startRow").value),
+        endRow: Number($("endRow").value)
+      };
+    }
+
+    function updateRangePreview() {
+      const { startRow, endRow } = currentRange();
+      $("rangeText").textContent = `${Number.isFinite(startRow) ? startRow : "-"} - ${Number.isFinite(endRow) ? endRow : "-"}`;
+    }
+
+    function validateRange() {
+      const { sheetName, startRow, endRow } = currentRange();
+      if (!sheetName) {
+        throw new Error("Pilih sheet terlebih dulu.");
+      }
+      if (!Number.isInteger(startRow) || !Number.isInteger(endRow)) {
+        throw new Error("Isi range baris dengan angka yang valid.");
+      }
+      if (startRow < 2 || endRow < 2) {
+        throw new Error("Range baris minimal dimulai dari 2.");
+      }
+      if (endRow < startRow) {
+        throw new Error("Baris akhir tidak boleh lebih kecil dari baris mulai.");
+      }
+      return { sheetName, startRow, endRow };
+    }
+
+    function updateSheetSelect(sheetNames = [], activeSheetName = "") {
+      const select = $("sheetSelect");
+      const uniqueNames = Array.isArray(sheetNames)
+        ? [...new Set(sheetNames.map((n) => String(n || "").trim()).filter(Boolean))]
+        : [];
+
+      knownSheetNames = uniqueNames;
+      select.innerHTML = "";
+
+      if (!uniqueNames.length) {
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "Tidak ada sheet tersedia";
+        select.appendChild(opt);
+        return;
+      }
+
+      uniqueNames.forEach((name) => {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        select.appendChild(opt);
+      });
+
+      if (activeSheetName && uniqueNames.includes(activeSheetName)) {
+        select.value = activeSheetName;
+      } else {
+        select.value = uniqueNames[0];
+      }
+    }
+
+    async function loadSheetInfo(sheetName = "") {
+      const normalizedSheetName = String(sheetName || "").trim();
+      const activeBeforeLoad = normalizedSheetName || $("sheetSelect").value.trim();
+
+      try{
+        setBusy(true);
+        setPdfLink("");
+        setStatus("Mengambil info sheet…");
+        const params = { action: "info" };
+        if (activeBeforeLoad) params.sheetName = activeBeforeLoad;
+        const res = await jsonp(GAS_WEBAPP_URL, params);
+        if (!res.ok) throw new Error(res.error || "Unknown error");
+
+        updateSheetSelect(res.sheetNames, res.sheetName);
+        $("sheetNameText").textContent = res.sheetName || "-";
+        $("lastRowText").textContent = String(res.lastRow ?? "-");
+        $("endRow").value = String(Math.max(2, Number(res.lastRow) || 2));
+        updateRangePreview();
+
+        setStatus(
+          `Info sheet berhasil diambil.\n` +
+          `Sheet: ${res.sheetName}\n` +
+          `Last row: ${res.lastRow}`,
+          "ok"
+        );
+      } catch(e){
+        setStatus("Error: " + (e.message || String(e)), "err");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function toPrintableUrl(url) {
+      if (!url || typeof url !== "string") return "";
+      try {
+        const u = new URL(url);
+        const host = u.hostname;
+
+        let fileId = "";
+        const pathMatch = u.pathname.match(/\/file\/d\/([^/]+)/);
+        if (pathMatch) fileId = pathMatch[1];
+        if (!fileId) fileId = u.searchParams.get("id") || "";
+
+        if ((host.includes("drive.google.com") || host.includes("docs.google.com")) && fileId) {
+          return `https://drive.google.com/file/d/${encodeURIComponent(fileId)}/view`;
+        }
+        return url;
+      } catch {
+        return url;
+      }
+    }
+
+    function openPrintDialog(url) {
+      if (!url) return;
+      const popup = window.open(url, "_blank");
+      if (!popup) {
+        setStatus("Popup diblokir browser. Izinkan popup lalu klik Print lagi.", "err");
+        return;
+      }
+      setTimeout(() => {
+        try {
+          popup.focus();
+          popup.print();
+        } catch (_) {
+          // Cross-origin viewer kadang blokir auto-print. User tetap bisa Ctrl+P.
+        }
+      }, 1200);
+    }
+
+    // JSONP helper (biar tembus CORS)
+    function jsonp(url, params) {
+      return new Promise((resolve, reject) => {
+        const cb = "cb_" + Math.random().toString(36).slice(2);
+        const qs = new URLSearchParams({ ...params, callback: cb });
+        const src = url + (url.includes("?") ? "&" : "?") + qs.toString();
+
+        window[cb] = (data) => {
+          cleanup();
+          resolve(data);
+        };
+
+        const script = document.createElement("script");
+        script.src = src;
+        script.onerror = () => {
+          cleanup();
+          reject(new Error("Gagal load JSONP (cek URL Web App / akses publik)."));
+        };
+
+        function cleanup() {
+          delete window[cb];
+          script.remove();
+        }
+
+        document.body.appendChild(script);
+      });
+    }
+
+    $("startRow").addEventListener("input", updateRangePreview);
+    $("endRow").addEventListener("input", updateRangePreview);
+    updateRangePreview();
+
+    $("btnInfo").addEventListener("click", () => {
+      loadSheetInfo($("sheetSelect").value);
+    });
+
+    $("sheetSelect").addEventListener("change", (ev) => {
+      const nextSheet = String(ev.target.value || "").trim();
+      if (!nextSheet || !knownSheetNames.includes(nextSheet)) return;
+      loadSheetInfo(nextSheet);
+    });
+
+    $("pdfLink").addEventListener("click", (ev) => {
+      ev.preventDefault();
+      openPrintDialog(ev.currentTarget.href);
+    });
+
+    $("btnGen").addEventListener("click", async () => {
+      try{
+        const { sheetName, startRow, endRow } = validateRange();
+        setBusy(true);
+        setPdfLink("");
+        setStatus("Generating PDF… (tunggu sebentar)");
+        const res = await jsonp(GAS_WEBAPP_URL, { action: "generate", sheetName, startRow, endRow });
+        if (!res.ok) throw new Error(res.error || "Unknown error");
+
+        const printUrl = toPrintableUrl(res.pdfUrl);
+        $("sheetNameText").textContent = res.sheetName || sheetName;
+        if (res.lastRow != null) $("lastRowText").textContent = String(res.lastRow);
+        $("rangeText").textContent = `${res.startRow} - ${res.endRow}`;
+        setPdfLink(printUrl, `Print PDF: ${res.pdfName || "hasil generate"}`);
+
+        setStatus(
+          `Selesai!\n`+
+          `Sheet: ${res.sheetName || sheetName}\n`+
+          `Dibuat: ${res.made} kuitansi\n`+
+          `Range: ${res.startRow} - ${res.endRow}\n\n`+
+          `PDF: ${res.pdfName}\n`+
+          `Print: ${printUrl}`
+        , "ok");
+      } catch(e){
+        setStatus("Error: " + (e.message || String(e)), "err");
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    window.addEventListener("load", () => {
+      loadSheetInfo();
+    });
+  </script>
+</body>
+</html>
